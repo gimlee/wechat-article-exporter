@@ -1,10 +1,24 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
+const enableUmami = Boolean(process.env.NUXT_UMAMI_ID && process.env.NUXT_UMAMI_HOST);
+
 export default defineNuxtConfig({
   compatibilityDate: '2025-10-30',
   devtools: {
     enabled: false,
   },
-  modules: ['@vueuse/nuxt', '@nuxt/ui', 'nuxt-monaco-editor', '@sentry/nuxt/module', 'nuxt-umami'],
+  devServer: {
+    port: 3001,
+  },
+  experimental: {
+    appManifest: false,
+  },
+  modules: [
+    '@vueuse/nuxt',
+    '@nuxt/ui',
+    'nuxt-monaco-editor',
+    '@sentry/nuxt/module',
+    ...(enableUmami ? ['nuxt-umami'] : []),
+  ],
   ssr: false,
   runtimeConfig: {
     public: {
@@ -64,7 +78,7 @@ export default defineNuxtConfig({
 
   // https://umami.nuxt.dev/api/configuration
   umami: {
-    enabled: true,
+    enabled: enableUmami,
     id: process.env.NUXT_UMAMI_ID,
     host: process.env.NUXT_UMAMI_HOST,
     domains: ['down.mptext.top'],
