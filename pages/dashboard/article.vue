@@ -53,7 +53,7 @@ interface Article extends AppMsgExWithFakeID, Partial<ArticleMetadata> {
   commentDownload: boolean;
 }
 
-type ExportUiType = 'excel' | 'json' | 'html' | 'text' | 'markdown' | 'word' | 'pdf';
+type ExportUiType = 'excel' | 'json' | 'html' | 'text' | 'markdown' | 'markdown-with-images' | 'word' | 'pdf';
 
 let globalRowData: Article[] = [];
 
@@ -629,6 +629,7 @@ function copyWechatLink() {
               { label: 'HTML', event: 'export-article-html' },
               { label: 'Txt', event: 'export-article-text' },
               { label: 'Markdown', event: 'export-article-markdown' },
+              { label: 'Markdown（含图片）', event: 'export-article-markdown-with-images' },
               { label: 'Word (内测中)', event: 'export-article-word' },
               { label: 'PDF (内测中)', event: 'export-article-pdf' },
             ]"
@@ -637,6 +638,7 @@ function copyWechatLink() {
             @export-article-html="exportSelectedFile('html', true)"
             @export-article-text="exportSelectedFile('text', true)"
             @export-article-markdown="exportSelectedFile('markdown', true)"
+            @export-article-markdown-with-images="exportSelectedFile('markdown-with-images', true)"
             @export-article-word="exportSelectedFile('word', true)"
             @export-article-pdf="exportSelectedFile('pdf', true)"
           >

@@ -19,7 +19,7 @@ import { type ExcelExportEntity, export2ExcelFile, export2JsonFile } from '~/uti
 import type { DownloadOptions } from './types';
 
 // 导出类型
-type ExportType = 'excel' | 'json' | 'html' | 'txt' | 'markdown' | 'word' | 'pdf';
+type ExportType = 'excel' | 'json' | 'html' | 'txt' | 'markdown' | 'markdown-with-images' | 'word' | 'pdf';
 
 const preferences: Ref<Preferences> = usePreferences() as unknown as Ref<Preferences>;
 
@@ -29,12 +29,12 @@ export class Exporter extends BaseDownloader {
 
   // 导出的根目录
   private exportRootDirectoryHandle: FileSystemDirectoryHandle | null = null;
-  private readonly resources: Set<{ url: string; fakeid: string }>;
+  private readonly resources: Map<string, { url: string; fakeid: string }>;
   private readonly exportedUrls: Set<string>;
 
   constructor(urls: string[], options: DownloadOptions = {}) {
     super(urls, options);
-    this.resources = new Set();
+    this.resources = new Map();
     this.exportedUrls = new Set();
   }
 
@@ -44,7 +44,7 @@ export class Exporter extends BaseDownloader {
       throw new Error('导出任务正在运行中，无需重复启动');
     }
 
-    if (['html', 'txt', 'markdown', 'word', 'pdf'].includes(type)) {
+    if (['html', 'txt', 'markdown', 'markdown-with-images', 'word', 'pdf'].includes(type)) {
       // 这些类型需要实时写入文件系统，提前初始化导出目录句柄
       try {
         await this.acquireExportDirectoryHandle();
@@ -55,6 +55,7 @@ export class Exporter extends BaseDownloader {
     }
 
     this.exportType = type;
+    this.resources.clear();
     this.exportedUrls.clear();
     this.isRunning = true;
     const start = Date.now();
@@ -82,7 +83,9 @@ export class Exporter extends BaseDownloader {
       } else if (this.exportType === 'word') {
         await this.exportWordFiles();
       } else if (this.exportType === 'markdown') {
-        await this.exportMarkdownFiles();
+        await this.exportMarkdownFiles(false);
+      } else if (this.exportType === 'markdown-with-images') {
+        await this.exportMarkdownFiles(true);
       } else if (this.exportType === 'pdf') {
         // 1. 提取出所有html中需要下载的资源链接（复用HTML导出管线）
         await this.extractResources();
@@ -102,70 +105,98 @@ export class Exporter extends BaseDownloader {
     }
   }
 
+  private addResource(url: string, fakeid: string) {
+    if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('//')) {
+      return;
+    }
+
+    const normalizedUrl = url.startsWith('//') ? `https:${url}` : url;
+    if (!this.resources.has(normalizedUrl)) {
+      this.resources.set(normalizedUrl, { url: normalizedUrl, fakeid });
+    }
+  }
+
   // 提取出 html 中的子资源，并保存在 resource-map 表中
   private async extractResources(): Promise<void> {
     const parser = new DOMParser();
+    const total = this.urls.length;
+    let completed = 0;
+
+    this.emit('export:parse', total);
 
     for (const url of this.urls) {
-      const article = await getArticleByLink(url);
-      if (!article) {
-        continue;
-      }
+      try {
+        const article = await getArticleByLink(url);
+        if (!article) {
+          continue;
+        }
 
-      const cached = await getHtmlCache(url);
-      if (!cached) {
-        console.warn(`文章(url: ${url} )的 html 还未下载，不能导出`);
-        continue;
-      }
+        const cached = await getHtmlCache(url);
+        if (!cached) {
+          console.warn(`文章(url: ${url} )的 html 还未下载，不能导出`);
+          continue;
+        }
 
-      const html = await cached.file.text();
-      const document = parser.parseFromString(html, 'text/html');
+        const html = await cached.file.text();
+        const document = parser.parseFromString(html, 'text/html');
 
-      // 该 html 内部的资源，包括图片、背景图片、样式
-      const resources: string[] = [];
+        // 该 html 内部的资源，包括图片、背景图片、样式
+        const resources: string[] = [];
 
-      // 提取图片地址
-      const imgs = document.querySelectorAll<HTMLImageElement>('img');
-      for (const img of imgs) {
-        const imgUrl = img.getAttribute('src') || img.getAttribute('data-src');
-        if (imgUrl) {
-          resources.push(imgUrl);
-          this.resources.add({ url: imgUrl, fakeid: article.fakeid });
+        // 提取图片地址
+        const imgs = document.querySelectorAll<HTMLImageElement>('img');
+        for (const img of imgs) {
+          const imgUrl = img.getAttribute('src') || img.getAttribute('data-src');
+          if (imgUrl) {
+            const normalizedUrl = imgUrl.startsWith('//') ? `https:${imgUrl}` : imgUrl;
+            resources.push(normalizedUrl);
+            this.addResource(normalizedUrl, article.fakeid);
+          }
+        }
+
+        // 提取样式地址
+        const links = document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]');
+        for (const link of links) {
+          const url = link.href;
+          if (url) {
+            const normalizedUrl = url.startsWith('//') ? `https:${url}` : url;
+            resources.push(normalizedUrl);
+            this.addResource(normalizedUrl, article.fakeid);
+          }
+        }
+
+        // 提取背景图片地址
+        html.replaceAll(
+          /((?:background|background-image): url\((?:&quot;)?)((?:https?|\/\/)[^)]+?)((?:&quot;)?\))/gs,
+          (_, p1, url, p3) => {
+            const normalizedUrl = url.startsWith('//') ? `https:${url}` : url;
+            resources.push(normalizedUrl);
+            this.addResource(normalizedUrl, article.fakeid);
+            return `${p1}${url}${p3}`;
+          }
+        );
+
+        await updateResourceMapCache({
+          fakeid: article.fakeid,
+          url: url,
+          resources: resources,
+        });
+      } catch (error) {
+        console.error(`解析文章资源失败(url: ${url}):`, error);
+      } finally {
+        completed++;
+        this.emit('export:parse:progress', completed);
+        if (completed % 20 === 0) {
+          await sleep(0);
         }
       }
-
-      // 提取样式地址
-      const links = document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]');
-      for (const link of links) {
-        const url = link.href;
-        if (url) {
-          resources.push(url);
-          this.resources.add({ url: url, fakeid: article.fakeid });
-        }
-      }
-
-      // 提取背景图片地址
-      html.replaceAll(
-        /((?:background|background-image): url\((?:&quot;)?)((?:https?|\/\/)[^)]+?)((?:&quot;)?\))/gs,
-        (_, p1, url, p3) => {
-          resources.push(url);
-          this.resources.add({ url: url, fakeid: article.fakeid });
-          return `${p1}${url}${p3}`;
-        }
-      );
-
-      await updateResourceMapCache({
-        fakeid: article.fakeid,
-        url: url,
-        resources: resources,
-      });
     }
   }
 
   // 处理导出任务队列
   private async processExportQueue() {
     const activePromises: Set<Promise<any>> = new Set();
-    const resources = [...this.resources];
+    const resources = [...this.resources.values()];
 
     while (resources.length > 0 || activePromises.size > 0) {
       // 检查是否需要启动新的下载任务，需同时满足以下两点:
@@ -203,7 +234,7 @@ export class Exporter extends BaseDownloader {
     task: (url: string) => Promise<void>,
     options: { concurrency?: number; progressEvent?: string } = {}
   ): Promise<void> {
-    const { concurrency = 5, progressEvent = 'export:progress' } = options;
+    const { concurrency = 20, progressEvent = 'export:progress' } = options;
     const activePromises: Set<Promise<void>> = new Set();
     const queue = [...urls];
     let completedCount = 0;
@@ -238,7 +269,7 @@ export class Exporter extends BaseDownloader {
       return false;
     }
 
-    if (['html', 'txt', 'markdown', 'word', 'pdf'].includes(type)) {
+    if (['html', 'txt', 'markdown', 'markdown-with-images', 'word', 'pdf'].includes(type)) {
       return true;
     }
 
@@ -456,26 +487,104 @@ export class Exporter extends BaseDownloader {
   }
 
   // 导出 markdown 文件（并发处理）
-  private async exportMarkdownFiles() {
+  private async exportMarkdownFiles(includeImages: boolean) {
     const total = this.urls.length;
     this.emit('export:total', total);
 
     const turndownService = new TurndownService();
 
-    await this.processFileExportQueue(this.urls, async url => {
-      const filename = await this.exportDirName(url);
-      console.log(`开始导出: ${filename}(${url})`);
+    await this.processFileExportQueue(
+      this.urls,
+      async url => {
+        const filename = await this.exportDirName(url);
+        console.log(`开始导出: ${filename}(${url})`);
 
-      const content = await this.getRenderedHTML(url);
-      if (!content) return;
-      const markdown = turndownService.turndown(content);
+        const content = await this.getRenderedHTML(url);
+        if (!content) return;
 
-      const blob = new Blob([markdown], { type: 'text/markdown' });
-      await this.writeFile(filename + '.md', blob);
-      await this.markExported(url, 'markdown');
-    });
-    await this.purgeMarkedExports('markdown');
+        let markdownContent = content;
+        if (includeImages) {
+          const article = await getArticleByLink(url);
+          if (!article) return;
+          markdownContent = await this.localizeMarkdownImages(content, filename, article.fakeid);
+        }
+
+        const markdown = turndownService.turndown(markdownContent);
+
+        const blob = new Blob([markdown], { type: 'text/markdown' });
+        if (includeImages) {
+          await this.writeFile(filename + '/index.md', blob);
+          await this.markExported(url, 'markdown-with-images');
+        } else {
+          await this.writeFile(filename + '.md', blob);
+          await this.markExported(url, 'markdown');
+        }
+      },
+      includeImages ? { concurrency: 5 } : {}
+    );
+    await this.purgeMarkedExports(includeImages ? 'markdown-with-images' : 'markdown');
     await sleep(100);
+  }
+
+  private async localizeMarkdownImages(html: string, dirname: string, fakeid: string): Promise<string> {
+    const parser = new DOMParser();
+    const document = parser.parseFromString(html, 'text/html');
+    const localImageMap = new Map<string, string>();
+    const imageElementsByUrl = new Map<string, HTMLImageElement[]>();
+
+    const imgs = document.querySelectorAll<HTMLImageElement>('img');
+    for (const img of imgs) {
+      const rawUrl = img.getAttribute('src') || img.getAttribute('data-src');
+      if (!rawUrl || rawUrl.startsWith('data:')) {
+        continue;
+      }
+
+      const normalizedUrl = rawUrl.startsWith('//') ? `https:${rawUrl}` : rawUrl;
+      if (!normalizedUrl.startsWith('http://') && !normalizedUrl.startsWith('https://')) {
+        continue;
+      }
+
+      const imageElements = imageElementsByUrl.get(normalizedUrl) || [];
+      imageElements.push(img);
+      imageElementsByUrl.set(normalizedUrl, imageElements);
+    }
+
+    const tasks = [...imageElementsByUrl.keys()].map(async normalizedUrl => {
+      try {
+        let resource = await getResourceCache(normalizedUrl);
+        if (!resource) {
+          await this.downloadResourceTask(normalizedUrl, fakeid);
+          resource = await getResourceCache(normalizedUrl);
+        }
+        if (!resource) {
+          return;
+        }
+
+        const uuid = new Date().getTime() + Math.random().toString();
+        const ext = mime.getExtension(resource.file.type) || 'bin';
+        const assetPath = `assets/${uuid}.${ext}`;
+        await this.writeFile(`${dirname}/${assetPath}`, resource.file);
+        localImageMap.set(normalizedUrl, `./${assetPath}`);
+      } catch (error) {
+        console.warn(`Markdown 图片导出失败(${normalizedUrl}):`, error);
+      }
+    });
+
+    await Promise.all(tasks);
+
+    for (const [normalizedUrl, imageElements] of imageElementsByUrl.entries()) {
+      const localPath = localImageMap.get(normalizedUrl);
+      if (!localPath) {
+        continue;
+      }
+
+      for (const img of imageElements) {
+        img.src = localPath;
+        img.removeAttribute('data-src');
+      }
+    }
+
+    return document.documentElement.outerHTML;
   }
 
   // 导出 word 文件（并发处理）
@@ -923,8 +1032,12 @@ export class Exporter extends BaseDownloader {
     const imgs = document.querySelectorAll<HTMLImageElement>('img');
     for (const img of imgs) {
       const imgUrl = img.getAttribute('src') || img.getAttribute('data-src');
-      if (imgUrl && urlmap.has(imgUrl)) {
-        img.src = urlmap.get(imgUrl)!;
+      if (imgUrl) {
+        const normalizedImgUrl = imgUrl.startsWith('//') ? `https:${imgUrl}` : imgUrl;
+        const localUrl = urlmap.get(imgUrl) || urlmap.get(normalizedImgUrl);
+        if (localUrl) {
+          img.src = localUrl;
+        }
       }
     }
 

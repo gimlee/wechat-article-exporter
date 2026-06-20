@@ -94,6 +94,14 @@ export default () => {
       completed_count.value = 0;
       total_count.value = 0;
     });
+    manager.on('export:parse', (total: number) => {
+      phase.value = '资源解析中';
+      completed_count.value = 0;
+      total_count.value = total;
+    });
+    manager.on('export:parse:progress', (index: number) => {
+      completed_count.value = index;
+    });
     manager.on('export:download', (total: number) => {
       phase.value = '资源下载中';
       completed_count.value = 0;
@@ -139,10 +147,34 @@ export default () => {
       completed_count.value = 0;
       total_count.value = 0;
     });
+    manager.on('export:parse', (total: number) => {
+      phase.value = '资源解析中';
+      completed_count.value = 0;
+      total_count.value = total;
+    });
+    manager.on('export:parse:progress', (index: number) => {
+      completed_count.value = index;
+    });
+    manager.on('export:download', (total: number) => {
+      phase.value = '资源下载中';
+      completed_count.value = 0;
+      total_count.value = total;
+    });
+    manager.on('export:download:progress', (url: string, success: boolean, status: ExporterStatus) => {
+      completed_count.value = status.completed.length;
+    });
     manager.on('export:total', (total: number) => {
       phase.value = '导出中';
       completed_count.value = 0;
       total_count.value = total;
+    });
+    manager.on('export:download', (total: number) => {
+      phase.value = '资源下载中';
+      completed_count.value = 0;
+      total_count.value = total;
+    });
+    manager.on('export:download:progress', () => {
+      completed_count.value++;
     });
     manager.on('export:progress', (index: number) => {
       completed_count.value = index;
@@ -164,7 +196,7 @@ export default () => {
   }
 
   // 导出 markdown
-  async function export2markdown(urls: string[]) {
+  async function export2markdown(urls: string[], includeImages = false) {
     if (urls.length === 0) {
       toast.success('提示', '请先选择文章');
       return;
@@ -172,7 +204,7 @@ export default () => {
 
     const manager = new Exporter(urls);
     manager.on('export:begin', () => {
-      phase.value = '资源解析中';
+      phase.value = '导出中';
       completed_count.value = 0;
       total_count.value = 0;
     });
@@ -186,12 +218,12 @@ export default () => {
     });
     manager.on('export:finish', (seconds: number) => {
       console.debug('耗时:', formatElapsedTime(seconds));
-      toast.success('Markdown 导出完成', `本次导出耗时 ${formatElapsedTime(seconds)}`);
+      toast.success(includeImages ? 'Markdown（含图片）导出完成' : 'Markdown 导出完成', `本次导出耗时 ${formatElapsedTime(seconds)}`);
     });
 
     try {
       loading.value = true;
-      await manager.startExport('markdown');
+      await manager.startExport(includeImages ? 'markdown-with-images' : 'markdown');
     } catch (error) {
       console.error('导出任务失败:', error);
       alert((error as Error).message);
@@ -250,6 +282,14 @@ export default () => {
       completed_count.value = 0;
       total_count.value = 0;
     });
+    manager.on('export:parse', (total: number) => {
+      phase.value = '资源解析中';
+      completed_count.value = 0;
+      total_count.value = total;
+    });
+    manager.on('export:parse:progress', (index: number) => {
+      completed_count.value = index;
+    });
     manager.on('export:download', (total: number) => {
       phase.value = '资源下载中';
       completed_count.value = 0;
@@ -282,10 +322,10 @@ export default () => {
     }
   }
 
-  const needsContentFormats = new Set(['html', 'text', 'markdown', 'word', 'pdf']);
+  const needsContentFormats = new Set(['html', 'text', 'markdown', 'markdown-with-images', 'word', 'pdf']);
 
   function exportFile(
-    type: 'excel' | 'json' | 'html' | 'text' | 'markdown' | 'word' | 'pdf',
+    type: 'excel' | 'json' | 'html' | 'text' | 'markdown' | 'markdown-with-images' | 'word' | 'pdf',
     urls: string[],
     contentNotDownloadedCount?: number,
   ) {
@@ -305,6 +345,8 @@ export default () => {
         return export2txt(urls);
       case 'markdown':
         return export2markdown(urls);
+      case 'markdown-with-images':
+        return export2markdown(urls, true);
       case 'word':
         return export2word(urls);
       case 'pdf':
