@@ -24,6 +24,7 @@ import toastFactory from '~/composables/toast';
 import { websiteName } from '~/config';
 import { sharedGridOptions } from '~/config/shared-grid-options';
 import { articleDeleted, updateArticleFakeid, updateArticleStatus } from '~/store/v2/article';
+import { getCommentCache } from '~/store/v2/comment';
 import { db } from '~/store/v2/db';
 import { getHtmlCache } from '~/store/v2/html';
 import type { Metadata } from '~/store/v2/metadata';
@@ -54,7 +55,13 @@ interface SingleArticleRow extends Partial<ArticleMetadata> {
   accountName?: string | null;
   _status: string;
   is_deleted: boolean;
+  exportedAt?: number;
+  exportedFormats?: string[];
+  purgedAt?: number;
+  cacheSize?: number;
 }
+
+type ExportUiType = 'excel' | 'json' | 'html' | 'text' | 'markdown' | 'word' | 'pdf';
 
 const preferences = usePreferences();
 
@@ -136,6 +143,42 @@ const columnDefs = ref<ColDef[]>([
     filterParams: createBooleanColumnFilterParams('已下载', '未下载'),
     minWidth: 140,
     cellClass: 'flex justify-center items-center',
+  },
+  {
+    headerName: '已导出',
+    colId: 'exported',
+    valueGetter: p => Boolean(p.data?.exportedAt),
+    cellDataType: 'boolean',
+    filter: 'agSetColumnFilter',
+    filterParams: createBooleanColumnFilterParams('已导出', '未导出'),
+    minWidth: 120,
+    cellClass: 'flex justify-center items-center',
+  },
+  {
+    headerName: '内容缓存状态',
+    colId: 'contentCacheState',
+    valueGetter: p => {
+      if (p.data?.contentDownload) return '已缓存';
+      if (p.data?.exportedAt && p.data?.purgedAt) return '已导出已清理';
+      return '未抓取';
+    },
+    filter: 'agSetColumnFilter',
+    minWidth: 160,
+    cellClass: 'flex justify-center items-center',
+  },
+  {
+    headerName: '导出时间',
+    field: 'exportedAt',
+    valueFormatter: p => (p.value ? dayjs(p.value).format('YYYY-MM-DD HH:mm:ss') : ''),
+    filter: 'agDateColumnFilter',
+    filterParams: createDateColumnFilterParams(),
+    filterValueGetter: (params: ValueGetterParams) => {
+      const value = params.getValue('exportedAt');
+      return value ? new Date(value) : null;
+    },
+    minWidth: 180,
+    initialHide: true,
+    cellClass: 'flex justify-center items-center font-mono',
   },
   {
     field: 'commentDownload',
@@ -246,10 +289,9 @@ watch(
   { deep: true }
 );
 
-onMounted(() => {
-  globalRowData.value.forEach(row => {
-    upsertArticleStub(row);
-  });
+onMounted(async () => {
+  await Promise.all(globalRowData.value.map(row => upsertArticleStub(row)));
+  await refreshRowsCacheState(globalRowData.value.map(row => row.link));
 });
 
 function normalizeUrl(url: string) {
@@ -322,7 +364,6 @@ async function addArticle() {
 function buildVirtualArticle(row: SingleArticleRow): AppMsgExWithFakeID {
   return {
     fakeid: row.fakeid,
-    _status: '',
     aid: row.aid,
     album_id: '',
     appmsg_album_infos: [],
@@ -338,7 +379,6 @@ function buildVirtualArticle(row: SingleArticleRow): AppMsgExWithFakeID {
     create_time: row.create_time,
     digest: row.digest,
     has_red_packet_cover: 0,
-    is_deleted: false,
     is_pay_subscribe: 0,
     item_show_type: 0,
     itemidx: row.itemidx,
@@ -352,11 +392,30 @@ function buildVirtualArticle(row: SingleArticleRow): AppMsgExWithFakeID {
     title: row.title,
     update_time: row.update_time,
     _single: true,
+    _status: row._status || '',
+    is_deleted: row.is_deleted || false,
+    exportedAt: row.exportedAt,
+    exportedFormats: row.exportedFormats,
+    purgedAt: row.purgedAt,
+    cacheSize: row.cacheSize,
   };
 }
 
-function upsertArticleStub(row: SingleArticleRow) {
-  return db.article.put(buildVirtualArticle(row), `${row.fakeid}:${row.aid}`);
+async function upsertArticleStub(row: SingleArticleRow) {
+  const key = `${row.fakeid}:${row.aid}`;
+  const existing = await db.article.get(key);
+  const article = buildVirtualArticle(row);
+  await db.article.put(
+    {
+      ...existing,
+      ...article,
+      exportedAt: row.exportedAt ?? existing?.exportedAt,
+      exportedFormats: row.exportedFormats ?? existing?.exportedFormats,
+      purgedAt: row.purgedAt ?? existing?.purgedAt,
+      cacheSize: row.cacheSize ?? existing?.cacheSize,
+    },
+    key
+  );
 }
 
 function getSelectedRows(): SingleArticleRow[] {
@@ -382,6 +441,26 @@ const contentNotDownloadedCount = computed(() => {
   return selectedArticles.value.filter(article => !article.contentDownload).length;
 });
 
+async function refreshRowsCacheState(urls: string[]) {
+  const targets = new Set(urls);
+  for (const article of globalRowData.value.filter(article => targets.has(article.link))) {
+    const stored = await db.article.where('link').equals(article.link).first();
+    article.contentDownload = (await getHtmlCache(article.link)) !== undefined;
+    article.commentDownload = (await getCommentCache(article.link)) !== undefined;
+    article.exportedAt = stored?.exportedAt;
+    article.exportedFormats = stored?.exportedFormats;
+    article.purgedAt = stored?.purgedAt;
+    article.cacheSize = stored?.cacheSize;
+    updateRow(article);
+  }
+}
+
+async function exportSelectedFile(type: ExportUiType, requireContent = false) {
+  const urls = [...selectedArticleUrls.value];
+  await exportFile(type, urls, requireContent ? contentNotDownloadedCount.value : undefined);
+  await refreshRowsCacheState(urls);
+}
+
 const {
   loading: downloadBtnLoading,
   completed_count: downloadCompletedCount,
@@ -401,6 +480,8 @@ const {
     const article = globalRowData.value.find(article => article.link === url);
     if (article) {
       article.contentDownload = true;
+      article.purgedAt = undefined;
+      article.cacheSize = undefined;
       article._status = '正常';
       await updateRowFromHtml(article);
 
@@ -447,6 +528,8 @@ const {
       if ((preferences.value as unknown as Preferences).downloadConfig.metadataOverrideContent) {
         // 如果同步下载文章内容，则更新相关字段
         article.contentDownload = true;
+        article.purgedAt = undefined;
+        article.cacheSize = undefined;
         article._status = '正常';
         updateArticleStatus(url, '正常');
 
@@ -524,8 +607,11 @@ async function updateRowFromHtml(row: SingleArticleRow) {
     }
   }
 
+  const key = `${row.fakeid}:${row.aid}`;
+  const existing = await db.article.get(key);
   await db.article.put(
     {
+      ...existing,
       ...buildVirtualArticle(row),
       digest: row.digest,
       cover: cover,
@@ -534,8 +620,12 @@ async function updateRowFromHtml(row: SingleArticleRow) {
       pic_cdn_url_3_4: cover,
       pic_cdn_url_16_9: cover,
       pic_cdn_url_235_1: cover,
+      exportedAt: row.exportedAt ?? existing?.exportedAt,
+      exportedFormats: row.exportedFormats ?? existing?.exportedFormats,
+      purgedAt: row.purgedAt ?? existing?.purgedAt,
+      cacheSize: row.cacheSize ?? existing?.cacheSize,
     },
-    `${row.fakeid}:${row.aid}`
+    key
   );
 }
 
@@ -628,13 +718,13 @@ async function removeRows() {
               { label: 'Word (内测中)', event: 'export-article-word' },
               { label: 'PDF (内测中)', event: 'export-article-pdf' },
             ]"
-            @export-article-excel="exportFile('excel', selectedArticleUrls)"
-            @export-article-json="exportFile('json', selectedArticleUrls)"
-            @export-article-html="exportFile('html', selectedArticleUrls, contentNotDownloadedCount)"
-            @export-article-text="exportFile('text', selectedArticleUrls, contentNotDownloadedCount)"
-            @export-article-markdown="exportFile('markdown', selectedArticleUrls, contentNotDownloadedCount)"
-            @export-article-word="exportFile('word', selectedArticleUrls, contentNotDownloadedCount)"
-            @export-article-pdf="exportFile('pdf', selectedArticleUrls, contentNotDownloadedCount)"
+            @export-article-excel="exportSelectedFile('excel')"
+            @export-article-json="exportSelectedFile('json')"
+            @export-article-html="exportSelectedFile('html', true)"
+            @export-article-text="exportSelectedFile('text', true)"
+            @export-article-markdown="exportSelectedFile('markdown', true)"
+            @export-article-word="exportSelectedFile('word', true)"
+            @export-article-pdf="exportSelectedFile('pdf', true)"
           >
             <UButton
               :loading="exportBtnLoading"

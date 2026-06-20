@@ -12,6 +12,7 @@ import type {
   ValueGetterParams,
 } from 'ag-grid-community';
 import { AgGridVue } from 'ag-grid-vue3';
+import dayjs from 'dayjs';
 import { defu } from 'defu';
 import type { PreviewArticle } from '#components';
 import { durationToSeconds, formatItemShowType, formatTimeStamp, sleep } from '#shared/utils/helpers';
@@ -25,6 +26,7 @@ import { isDev, websiteName } from '~/config';
 import { sharedGridOptions } from '~/config/shared-grid-options';
 import { articleDeleted, getArticleCache, updateArticleStatus } from '~/store/v2/article';
 import { getCommentCache } from '~/store/v2/comment';
+import { db } from '~/store/v2/db';
 import { getDebugCache } from '~/store/v2/debug';
 import { getHtmlCache } from '~/store/v2/html';
 import { type MpAccount } from '~/store/v2/info';
@@ -50,6 +52,8 @@ interface Article extends AppMsgExWithFakeID, Partial<ArticleMetadata> {
    */
   commentDownload: boolean;
 }
+
+type ExportUiType = 'excel' | 'json' | 'html' | 'text' | 'markdown' | 'word' | 'pdf';
 
 let globalRowData: Article[] = [];
 
@@ -158,6 +162,42 @@ const columnDefs = ref<ColDef[]>([
     filterParams: createBooleanColumnFilterParams('已下载', '未下载'),
     minWidth: 150,
     cellClass: 'flex justify-center items-center',
+  },
+  {
+    headerName: '已导出',
+    colId: 'exported',
+    valueGetter: p => Boolean(p.data?.exportedAt),
+    cellDataType: 'boolean',
+    filter: 'agSetColumnFilter',
+    filterParams: createBooleanColumnFilterParams('已导出', '未导出'),
+    minWidth: 120,
+    cellClass: 'flex justify-center items-center',
+  },
+  {
+    headerName: '内容缓存状态',
+    colId: 'contentCacheState',
+    valueGetter: p => {
+      if (p.data?.contentDownload) return '已缓存';
+      if (p.data?.exportedAt && p.data?.purgedAt) return '已导出已清理';
+      return '未抓取';
+    },
+    filter: 'agSetColumnFilter',
+    minWidth: 160,
+    cellClass: 'flex justify-center items-center',
+  },
+  {
+    headerName: '导出时间',
+    field: 'exportedAt',
+    valueFormatter: p => (p.value ? dayjs(p.value).format('YYYY-MM-DD HH:mm:ss') : ''),
+    filter: 'agDateColumnFilter',
+    filterParams: createDateColumnFilterParams(),
+    filterValueGetter: (params: ValueGetterParams) => {
+      const value = params.getValue('exportedAt');
+      return value ? new Date(value) : null;
+    },
+    minWidth: 180,
+    initialHide: true,
+    cellClass: 'flex justify-center items-center font-mono',
   },
   {
     field: 'commentDownload',
@@ -412,6 +452,26 @@ const contentNotDownloadedCount = computed(() => {
   return selectedArticles.value.filter(article => !article.contentDownload).length;
 });
 
+async function refreshRowsCacheState(urls: string[]) {
+  const targets = new Set(urls);
+  for (const article of globalRowData.filter(article => targets.has(article.link))) {
+    const stored = await db.article.where('link').equals(article.link).first();
+    article.contentDownload = (await getHtmlCache(article.link)) !== undefined;
+    article.commentDownload = (await getCommentCache(article.link)) !== undefined;
+    article.exportedAt = stored?.exportedAt;
+    article.exportedFormats = stored?.exportedFormats;
+    article.purgedAt = stored?.purgedAt;
+    article.cacheSize = stored?.cacheSize;
+    updateRow(article);
+  }
+}
+
+async function exportSelectedFile(type: ExportUiType, requireContent = false) {
+  const urls = [...selectedArticleUrls.value];
+  await exportFile(type, urls, requireContent ? contentNotDownloadedCount.value : undefined);
+  await refreshRowsCacheState(urls);
+}
+
 const {
   loading: downloadBtnLoading,
   completed_count: downloadCompletedCount,
@@ -423,6 +483,8 @@ const {
     const article = globalRowData.find(article => article.link === url);
     if (article) {
       article.contentDownload = true;
+      article.purgedAt = undefined;
+      article.cacheSize = undefined;
       article._status = '正常';
       updateRow(article);
 
@@ -467,6 +529,8 @@ const {
       if ((preferences.value as unknown as Preferences).downloadConfig.metadataOverrideContent) {
         // 如果同步下载文章内容，则更新相关字段
         article.contentDownload = true;
+        article.purgedAt = undefined;
+        article.cacheSize = undefined;
         article._status = '正常';
         updateArticleStatus(url, '正常');
 
@@ -568,13 +632,13 @@ function copyWechatLink() {
               { label: 'Word (内测中)', event: 'export-article-word' },
               { label: 'PDF (内测中)', event: 'export-article-pdf' },
             ]"
-            @export-article-excel="exportFile('excel', selectedArticleUrls)"
-            @export-article-json="exportFile('json', selectedArticleUrls)"
-            @export-article-html="exportFile('html', selectedArticleUrls, contentNotDownloadedCount)"
-            @export-article-text="exportFile('text', selectedArticleUrls, contentNotDownloadedCount)"
-            @export-article-markdown="exportFile('markdown', selectedArticleUrls, contentNotDownloadedCount)"
-            @export-article-word="exportFile('word', selectedArticleUrls, contentNotDownloadedCount)"
-            @export-article-pdf="exportFile('pdf', selectedArticleUrls, contentNotDownloadedCount)"
+            @export-article-excel="exportSelectedFile('excel')"
+            @export-article-json="exportSelectedFile('json')"
+            @export-article-html="exportSelectedFile('html', true)"
+            @export-article-text="exportSelectedFile('text', true)"
+            @export-article-markdown="exportSelectedFile('markdown', true)"
+            @export-article-word="exportSelectedFile('word', true)"
+            @export-article-pdf="exportSelectedFile('pdf', true)"
           >
             <UButton
               :loading="exportBtnLoading"

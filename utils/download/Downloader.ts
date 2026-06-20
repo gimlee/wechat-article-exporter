@@ -2,6 +2,7 @@ import { throwException, timeout } from '#shared/utils/helpers';
 import { parseCgiDataNew, validateHTMLContent } from '#shared/utils/html';
 import usePreferences from '~/composables/usePreferences';
 import { getArticleByLink, getSingleArticleByLink } from '~/store/v2/article';
+import { markArticleContentCached } from '~/store/v2/cache';
 import { updateCommentCache } from '~/store/v2/comment';
 import { updateCommentReplyCache } from '~/store/v2/comment_reply';
 import { updateDebugCache } from '~/store/v2/debug';
@@ -182,6 +183,7 @@ export class Downloader extends BaseDownloader {
             file: blob,
             commentID,
           });
+          await markArticleContentCached(url);
           this.pending.delete(url);
           this.completed.add(url);
           this.proxyManager.recordSuccess(proxy);
@@ -278,6 +280,7 @@ export class Downloader extends BaseDownloader {
               file: blob,
               commentID,
             });
+            await markArticleContentCached(url);
           }
           this.pending.delete(url);
           this.completed.add(url);

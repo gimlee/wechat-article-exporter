@@ -40,6 +40,9 @@ interface ExportConfig {
 
   // 导出html中是否包含评论
   exportHtmlIncludeComments: boolean;
+
+  // 导出成功后是否自动清理 IndexedDB 中的正文和资源缓存
+  autoPurgeIndexedDBAfterExport: boolean;
 }
 
 interface DownloadConfig {

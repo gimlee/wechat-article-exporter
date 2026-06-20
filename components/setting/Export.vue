@@ -91,6 +91,16 @@
           label="导出 HTML 中包含留言数据"
         />
       </div>
+      <div>
+        <UCheckbox
+          v-model="preferences.exportConfig.autoPurgeIndexedDBAfterExport"
+          name="autoPurgeIndexedDBAfterExport"
+          label="导出成功后自动清理 IndexedDB 正文和资源缓存"
+        />
+        <p class="mt-1 text-sm text-gray-500">
+          保留文章列表、公众号信息和导出状态，只删除已导出文章在浏览器 IndexedDB 中的大体积缓存。
+        </p>
+      </div>
     </div>
   </UCard>
 </template>

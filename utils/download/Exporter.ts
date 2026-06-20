@@ -5,6 +5,7 @@ import { filterInvalidFilenameChars, sleep } from '#shared/utils/helpers';
 import { parseCgiDataNew } from '#shared/utils/html';
 import { renderHTMLFromCgiDataNew, renderTextFromCgiDataNew } from '#shared/utils/renderer';
 import usePreferences from '~/composables/usePreferences';
+import { markArticleExported, markArticlesExported, purgeArticleContentCaches } from '~/store/v2';
 import { getArticleByLink } from '~/store/v2/article';
 import { getHtmlCache, type HtmlAsset } from '~/store/v2/html';
 import { getAccountNameByFakeid, getAllInfo, type MpAccount } from '~/store/v2/info';
@@ -29,10 +30,12 @@ export class Exporter extends BaseDownloader {
   // 导出的根目录
   private exportRootDirectoryHandle: FileSystemDirectoryHandle | null = null;
   private readonly resources: Set<{ url: string; fakeid: string }>;
+  private readonly exportedUrls: Set<string>;
 
   constructor(urls: string[], options: DownloadOptions = {}) {
     super(urls, options);
     this.resources = new Set();
+    this.exportedUrls = new Set();
   }
 
   // 启动导出任务
@@ -52,6 +55,7 @@ export class Exporter extends BaseDownloader {
     }
 
     this.exportType = type;
+    this.exportedUrls.clear();
     this.isRunning = true;
     const start = Date.now();
     this.emit('export:begin');
@@ -229,6 +233,48 @@ export class Exporter extends BaseDownloader {
     }
   }
 
+  private shouldPurgeAfterExport(type: ExportType): boolean {
+    if (!preferences.value.exportConfig.autoPurgeIndexedDBAfterExport) {
+      return false;
+    }
+
+    if (['html', 'txt', 'markdown', 'word', 'pdf'].includes(type)) {
+      return true;
+    }
+
+    if (type === 'excel') {
+      return preferences.value.exportConfig.exportExcelIncludeContent;
+    }
+
+    if (type === 'json') {
+      return (
+        preferences.value.exportConfig.exportJsonIncludeContent ||
+        preferences.value.exportConfig.exportJsonIncludeComments
+      );
+    }
+
+    return false;
+  }
+
+  private async markExported(url: string, format: ExportType): Promise<void> {
+    await markArticleExported(url, format);
+    this.exportedUrls.add(url);
+  }
+
+  private async purgeMarkedExports(format: ExportType): Promise<void> {
+    if (this.shouldPurgeAfterExport(format) && this.exportedUrls.size > 0) {
+      await purgeArticleContentCaches([...this.exportedUrls]);
+    }
+  }
+
+  private async markBatchExportedAndMaybePurge(format: ExportType): Promise<void> {
+    await markArticlesExported(this.urls, format);
+    this.urls.forEach(url => this.exportedUrls.add(url));
+    if (this.shouldPurgeAfterExport(format)) {
+      await purgeArticleContentCaches([...this.exportedUrls]);
+    }
+  }
+
   // 下载资源任务
   private async downloadResourceTask(url: string, fakeid: string): Promise<void> {
     this.pending.add(url);
@@ -295,6 +341,7 @@ export class Exporter extends BaseDownloader {
     }
 
     await export2ExcelFile(data, '微信公众号文章');
+    await this.markBatchExportedAndMaybePurge('excel');
   }
 
   // 导出 json 文件
@@ -333,6 +380,7 @@ export class Exporter extends BaseDownloader {
     }
 
     await export2JsonFile(data, '微信公众号文章');
+    await this.markBatchExportedAndMaybePurge('json');
   }
 
   // 导出 html 文件（并发处理）
@@ -379,9 +427,11 @@ export class Exporter extends BaseDownloader {
         const blob = new Blob([finalHtml], { type: 'text/html;charset=utf-8' });
 
         await this.writeFile(dirname + '/index.html', blob);
+        await this.markExported(url, 'html');
       },
       { progressEvent: 'export:write:progress' }
     );
+    await this.purgeMarkedExports('html');
     await sleep(100);
   }
 
@@ -399,7 +449,9 @@ export class Exporter extends BaseDownloader {
 
       const blob = new Blob([content], { type: 'text/plain' });
       await this.writeFile(filename + '.txt', blob);
+      await this.markExported(url, 'txt');
     });
+    await this.purgeMarkedExports('txt');
     await sleep(100);
   }
 
@@ -420,7 +472,9 @@ export class Exporter extends BaseDownloader {
 
       const blob = new Blob([markdown], { type: 'text/markdown' });
       await this.writeFile(filename + '.md', blob);
+      await this.markExported(url, 'markdown');
     });
+    await this.purgeMarkedExports('markdown');
     await sleep(100);
   }
 
@@ -438,7 +492,9 @@ export class Exporter extends BaseDownloader {
       const blob = window.htmlDocx.asBlob(content) as Blob;
 
       await this.writeFile(filename + '.docx', blob);
+      await this.markExported(url, 'word');
     });
+    await this.purgeMarkedExports('word');
     await sleep(100);
   }
 
@@ -504,9 +560,11 @@ export class Exporter extends BaseDownloader {
 
         const pdfBlob = await response.blob();
         await this.writeFile(filename + '.pdf', pdfBlob);
+        await this.markExported(url, 'pdf');
       },
       { concurrency: 2, progressEvent: 'export:write:progress' },
     );
+    await this.purgeMarkedExports('pdf');
     await sleep(100);
   }
 

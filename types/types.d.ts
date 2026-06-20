@@ -173,6 +173,12 @@ export type AppMsgExWithFakeID = AppMsgEx & {
 
   // 是否是单文章下载添加的数据
   _single?: boolean;
+
+  // 导出和缓存清理状态
+  exportedAt?: number;
+  exportedFormats?: string[];
+  purgedAt?: number;
+  cacheSize?: number;
 };
 
 export interface DownloadableArticle {

@@ -1,4 +1,13 @@
 import { db } from './db';
+export {
+  markArticleContentCached,
+  markArticleExported,
+  markArticlesExported,
+  purgeAllArticleContentCaches,
+  purgeArticleContentCaches,
+  purgeExportedArticleCaches,
+  type PurgeCacheResult,
+} from './cache';
 
 // 删除公众号数据
 export async function deleteAccountData(ids: string[]): Promise<void> {

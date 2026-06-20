@@ -26,7 +26,19 @@ export async function updateArticleCache(account: MpAccount, publish_page: Publi
       let newEntryCount = 0;
 
       for (const article of publish_info.appmsgex) {
-        const key = await db.article.put({ ...article, fakeid, _status: '' }, `${fakeid}:${article.aid}`);
+        const key = `${fakeid}:${article.aid}`;
+        const existing = await db.article.get(key);
+        const exportedState = existing
+          ? {
+              exportedAt: existing.exportedAt,
+              exportedFormats: existing.exportedFormats,
+              purgedAt: existing.purgedAt,
+              cacheSize: existing.cacheSize,
+              _single: existing._single,
+            }
+          : {};
+
+        await db.article.put({ ...article, fakeid, _status: existing?._status || '', ...exportedState }, key);
         if (!keys.includes(key)) {
           newEntryCount++;
           articleCount++;

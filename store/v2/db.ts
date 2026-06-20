@@ -51,4 +51,8 @@ db.version(3).stores({
   debug: 'url, fakeid',
 });
 
+db.version(4).stores({
+  article: ', fakeid, create_time, link, exportedAt, purgedAt',
+});
+
 export { db };
